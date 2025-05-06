@@ -1,0 +1,56 @@
+use rdkafka::config::RDKafkaLogLevel;
+use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::{ClientConfig, Message};
+use rdkafka::message::Headers;
+// use serde_json::{json, Value};
+
+
+async fn consume(brokers: &str, group_id: &str, topics: &[&str]) {
+    let consumer: StreamConsumer = ClientConfig::new()
+        .set("group.id", group_id)
+        .set("bootstrap.servers", brokers)
+        .set("enable.partition.eof", "false")
+        .set("session.timeout.ms", "6000")
+        .set("enable.auto.commit", "true")
+        //.set("statistics.interval.ms", "30000")
+        //.set("auto.offset.reset", "smallest")
+        .set_log_level(RDKafkaLogLevel::Debug)
+        .create()
+        .expect("Consumer creation error");
+
+    consumer.subscribe(topics)
+            .expect("Cannot subscribe to topics");
+
+    loop {
+        match consumer.recv().await {
+            Err(e) => println!("Kafka error: {}", e),
+            Ok(m) => {
+                let payload = match m.payload_view::<str>() {
+                    None => "",
+                    Some(Ok(s)) => s,
+                    Some(Err(e)) => {
+                        println!("Error deserializing payload {:?}", e);
+                        ""
+                    }
+
+                };
+                println!("key: '{:?}', payload: '{}', topic: {}, partition: {}, offset: {}, timestamp: {:?}",
+                      m.key(), payload, m.topic(), m.partition(), m.offset(), m.timestamp());
+
+                if let Some(headers) = m.headers() {
+                    for header in headers.iter() {
+                        println!("  Header {:#?}: {:?}", header.key, header.value);
+                    }
+                }
+                consumer.commit_message(&m, CommitMode::Async).unwrap();
+            }
+        }
+    }
+}
+
+
+#[tokio::main]
+async fn main() {
+    consume("localhost:9094", "my_group", &["quickstart-events"]).await
+}
+
