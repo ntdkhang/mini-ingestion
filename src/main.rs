@@ -1,3 +1,4 @@
+use clickhouse::sql::Identifier;
 use clickhouse::{Client, Row};
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
@@ -15,7 +16,7 @@ struct MyRow {
 struct MyMessage {
 }
 
-async fn consume_to_clickhouse(client: &Client, brokers: &str, group_id: &str, topics: &[&str]) {
+async fn consume_to_clickhouse(client: &Client, brokers: &str, group_id: &str, topics: &[&str]) -> Result<(), std::io::Error> {
     let mut inserter = client.inserter("test")
         .unwrap()
         .with_max_rows(100);
@@ -35,43 +36,54 @@ async fn consume_to_clickhouse(client: &Client, brokers: &str, group_id: &str, t
     consumer.subscribe(topics)
             .expect("Cannot subscribe to topics");
 
-    loop {
-        match consumer.recv().await {
-            Err(e) => println!("Kafka error: {}", e),
-            Ok(m) => {
-                let payload = match m.payload_view::<str>() {
-                    None => "",
-                    Some(Ok(s)) => s,
-                    Some(Err(e)) => {
-                        println!("Error deserializing payload {:?}", e);
-                        ""
-                    }
-
-                };
-                println!("key: '{:?}', payload: '{}', topic: {}, partition: {}, offset: {}, timestamp: {:?}",
-                      m.key(), payload, m.topic(), m.partition(), m.offset(), m.timestamp());
-                let row: MyRow = serde_json::from_str(payload).expect("Failed to Deserialize payload");
-                let _ = inserter.write(&row);
-                inserter.commit().await.unwrap();
-
-                // if let Some(headers) = m.headers() {
-                //     for header in headers.iter() {
-                //         println!("  Header {:#?}: {:?}", header.key, header.value);
-                //     }
-                // }
-                consumer.commit_message(&m, CommitMode::Async).unwrap();
+    while let Ok(m) = consumer.recv().await {
+        let payload = match m.payload_view::<str>() {
+            None => "",
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
+                println!("Error deserializing payload {:?}", e);
+                ""
             }
-        }
+
+        };
+        println!("key: '{:?}', payload: '{}', topic: {}, partition: {}, offset: {}, timestamp: {:?}",
+            m.key(), payload, m.topic(), m.partition(), m.offset(), m.timestamp());
+        let row: MyRow = serde_json::from_str(payload).expect("Failed to Deserialize payload");
+        inserter.write(&row)?;//.unwrap();
+        inserter.commit().await?;//.unwrap();
+
+        consumer.commit_message(&m, CommitMode::Async).unwrap();
+
     }
+
+    inserter.end().await?;
+    Ok(())
 }
 
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), std::io::Error> {
     let client = Client::default()
-        // .with_url("http://localhost:8123")
-        .with_database("test");
+        .with_url("http://localhost:8123");
+        // .with_database("test");
 
-    consume_to_clickhouse(&client, "localhost:9094", "my_group", &["quickstart-events"]).await;
+    client
+        .query(
+            "CREATE OR REPLACE TABLE ? (
+                user_id String,
+                event String,
+
+            )
+            ENGINE = MergeTree
+            ORDER BY user_id",
+        )
+        .bind(Identifier("test"))
+        .execute()
+        .await?;
+
+
+    consume_to_clickhouse(&client, "localhost:9094", "my_group", &["quickstart-events"]).await?;
+
+    Ok(())
 }
 
